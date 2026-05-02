@@ -1,3 +1,4 @@
-flask
-google-genai
+Flask
+google-generativeai
+requests
 gunicorn

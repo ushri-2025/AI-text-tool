@@ -1,136 +1,155 @@
-from flask import Flask, render_template, request, jsonify
-from google import genai
-import time
-import random
+from flask import Flask, request, jsonify, render_template
+import google.generativeai as genai
+import requests
 
 app = Flask(__name__)
-
 import os
-client = genai.Client(api_key=os.getenv("API_KEY"))
+
+GEMINI_KEY = os.getenv("GEMINI_KEY")
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
+
+genai.configure(api_key=GEMINI_KEY)
 
 
-def generate_with_retry(prompt):
-    models_to_try = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-flash-latest"
-    ]
-
-    for model in models_to_try:
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=prompt
-                )
-
-                if hasattr(response, "text") and response.text:
-                    return response.text.strip()
-
-            except Exception as e:
-                print(f"Error with {model}, attempt {attempt+1}:", e)
-
-                if "503" in str(e):
-                    time.sleep(2)
-                    continue
-                else:
-                    break
-
-    return "Sorry, unable to process right now."
+history_store = []
 
 
-@app.route('/')
-def home():
-    return render_template('index.html')
+# =========================
+# PROMPT BUILDER (STRICT)
+# =========================
+def build_prompt(text, mode, tone):
 
+    lower = text.lower()
 
-@app.route('/process', methods=['POST'])
-def process_text():
-    data = request.get_json()
+    if mode == "autocorrect":
+        return f"""
+Correct grammar only. Do not add anything.
 
-    text = data.get('text', '').strip()
-    mode = data.get('mode')
-    style = data.get('style')
-    retry_count = data.get('retry', 0)
+{text}
+"""
 
-    if not text:
-        return jsonify({"result": "Please enter text."})
+    if mode == "improve":
+        return f"""
+Rewrite in {tone} tone.
 
-    variation = ""
-    if retry_count > 0:
-        variation = random.choice([
-            "Use a different phrasing.",
-            "Provide a fresh version.",
-            "Reword creatively."
+Rules:
+- Single sentence only
+- Do NOT expand
+
+{text}
+"""
+
+    if mode == "humanize":
+        return f"""
+Make this sound natural.
+
+Rules:
+- Keep same format
+- No expansion
+
+{text}
+"""
+
+    if mode == "write":
+
+        is_email = any(word in lower for word in [
+            "email", "mail", "write to", "send to", "compose"
         ])
 
-    if mode == "correct":
-        prompt = f"""
-Correct the text grammatically.
+        if is_email:
+            return f"""
+Write a professional email.
 
-IMPORTANT:
-- Return ONLY one version
-- Preserve length and structure
-- Do NOT summarize
-- Do NOT expand unnecessarily
+Include:
+- Subject
+- Greeting
+- Body
+- Closing
 
-Text:
 {text}
 """
 
-    elif mode == "improve":
-        prompt = f"""
-Rewrite in a {style} tone.
+        if "story" in lower:
+            return f"Write a meaningful short story:\n{text}"
 
-IMPORTANT:
-- Keep same length
-- Do NOT expand unnecessarily
-- No explanation
-- {variation}
+        if "report" in lower or "paragraph" in lower:
+            return f"Write a structured paragraph:\n{text}"
 
-Text:
-{text}
-"""
+        return f"Write a good paragraph:\n{text}"
 
-    elif mode == "humanize":
-        prompt = f"""
-Rewrite to sound natural and human.
+    return text
 
-IMPORTANT:
-- Maintain same length
-- Do NOT expand unnecessarily
-- No summarization
-- {variation}
 
-Text:
-{text}
-"""
+# =========================
+# GEMINI
+# =========================
+def call_gemini(prompt):
+    try:
+        res = genai.GenerativeModel("gemini-1.5-flash").generate_content(prompt)
+        return res.text.strip()
+    except:
+        return None
 
-    elif mode == "write":
-        prompt = f"""
-Write content based on the user's input.
 
-IMPORTANT:
-- Detect intent automatically (email, paragraph, story, etc.)
-- Keep output concise and relevant
-- If paragraph → 1–2 paragraphs
-- If email → proper format
-- Do NOT generate overly long output
-- Keep it natural and readable
+# =========================
+# OPENROUTER
+# =========================
+def call_openrouter(prompt):
+    try:
+        r = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "openai/gpt-3.5-turbo",
+                "messages": [{"role": "user", "content": prompt}]
+            }
+        )
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except:
+        return None
 
-Input:
-{text}
 
-{variation}
-"""
+# =========================
+# MAIN ENGINE
+# =========================
+def generate_text(text, mode, tone="formal", variation=0):
 
-    else:
-        prompt = text
+    prompt = build_prompt(text, mode, tone)
 
-    result = generate_with_retry(prompt)
+    res = call_gemini(prompt)
+    if res:
+        return res
+
+    res = call_openrouter(prompt)
+    if res:
+        return res
+
+    return "Please retry. Service temporarily unavailable."
+
+
+# =========================
+# ROUTES
+# =========================
+@app.route("/")
+def home():
+    return render_template("index.html")
+
+
+@app.route("/process", methods=["POST"])
+def process():
+    data = request.json
+
+    result = generate_text(
+        data.get("text"),
+        data.get("mode"),
+        data.get("tone")
+    )
 
     return jsonify({"result": result})
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run(debug=True)

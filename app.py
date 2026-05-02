@@ -1,155 +1,143 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, render_template, request, jsonify
 import google.generativeai as genai
-import requests
+import os
+import random
 
 app = Flask(__name__)
-import os
 
+# ===== API KEYS =====
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 
 genai.configure(api_key=GEMINI_KEY)
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 
-history_store = []
+# ===== SAFE GEMINI RESPONSE FUNCTION =====
+def get_gemini_response(prompt):
+    try:
+        response = model.generate_content(prompt)
+
+        # FIX: Proper extraction
+        if hasattr(response, "text") and response.text:
+            return response.text.strip()
+
+        elif hasattr(response, "candidates") and response.candidates:
+            return response.candidates[0].content.parts[0].text.strip()
+
+        else:
+            return None
+
+    except Exception as e:
+        print("Gemini Error:", e)
+        return None
 
 
-# =========================
-# PROMPT BUILDER (STRICT)
-# =========================
-def build_prompt(text, mode, tone):
-
-    lower = text.lower()
+# ===== FALLBACK (only if API fails) =====
+def fallback_response(text, mode, tone=None):
+    text = text.strip()
 
     if mode == "autocorrect":
-        return f"""
-Correct grammar only. Do not add anything.
-
-{text}
-"""
+        return text.capitalize()
 
     if mode == "improve":
-        return f"""
-Rewrite in {tone} tone.
-
-Rules:
-- Single sentence only
-- Do NOT expand
-
-{text}
-"""
+        if tone == "formal":
+            return f"I would like to state that {text}."
+        elif tone == "casual":
+            return f"Hey, just saying — {text}."
+        else:
+            return f"{text}."
 
     if mode == "humanize":
-        return f"""
-Make this sound natural.
-
-Rules:
-- Keep same format
-- No expansion
-
-{text}
-"""
+        return f"{text}. It sounds more natural when expressed this way."
 
     if mode == "write":
-
-        is_email = any(word in lower for word in [
-            "email", "mail", "write to", "send to", "compose"
-        ])
-
-        if is_email:
-            return f"""
-Write a professional email.
-
-Include:
-- Subject
-- Greeting
-- Body
-- Closing
-
-{text}
-"""
-
-        if "story" in lower:
-            return f"Write a meaningful short story:\n{text}"
-
-        if "report" in lower or "paragraph" in lower:
-            return f"Write a structured paragraph:\n{text}"
-
-        return f"Write a good paragraph:\n{text}"
+        if "email" in text.lower():
+            return (
+                "Subject: Request\n\n"
+                "Dear Sir/Madam,\n\n"
+                "I hope you are doing well. I am writing regarding your request.\n\n"
+                "Thank you.\n\n"
+                "Sincerely,\nYour Name"
+            )
+        else:
+            return f"{text}. This is a basic response."
 
     return text
 
 
-# =========================
-# GEMINI
-# =========================
-def call_gemini(prompt):
-    try:
-        res = genai.GenerativeModel("gemini-1.5-flash").generate_content(prompt)
-        return res.text.strip()
-    except:
-        return None
-
-
-# =========================
-# OPENROUTER
-# =========================
-def call_openrouter(prompt):
-    try:
-        r = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "openai/gpt-3.5-turbo",
-                "messages": [{"role": "user", "content": prompt}]
-            }
-        )
-        return r.json()["choices"][0]["message"]["content"].strip()
-    except:
-        return None
-
-
-# =========================
-# MAIN ENGINE
-# =========================
-def generate_text(text, mode, tone="formal", variation=0):
-
-    prompt = build_prompt(text, mode, tone)
-
-    res = call_gemini(prompt)
-    if res:
-        return res
-
-    res = call_openrouter(prompt)
-    if res:
-        return res
-
-    return "Please retry. Service temporarily unavailable."
-
-
-# =========================
-# ROUTES
-# =========================
+# ===== MAIN ROUTE =====
 @app.route("/")
 def home():
     return render_template("index.html")
 
 
+# ===== PROCESS ROUTE =====
 @app.route("/process", methods=["POST"])
 def process():
     data = request.json
+    text = data.get("text", "")
+    mode = data.get("mode", "")
+    tone = data.get("tone", "")
+    retry = data.get("retry", False)
 
-    result = generate_text(
-        data.get("text"),
-        data.get("mode"),
-        data.get("tone")
-    )
+    prompt = ""
+
+    # ===== AUTOCORRECT =====
+    if mode == "autocorrect":
+        prompt = f"Correct grammar and rewrite properly:\n{text}"
+
+    # ===== IMPROVE =====
+    elif mode == "improve":
+        if tone == "formal":
+            prompt = f"Rewrite this in a formal professional tone:\n{text}"
+        elif tone == "casual":
+            prompt = f"Rewrite this in a casual friendly tone:\n{text}"
+        elif tone == "technical":
+            prompt = f"Rewrite this in a technical and precise tone:\n{text}"
+        else:
+            prompt = f"Improve the quality of this text:\n{text}"
+
+    # ===== HUMANIZE =====
+    elif mode == "humanize":
+        prompt = f"Make this sound natural, human-like, and fluent:\n{text}"
+
+    # ===== WRITE =====
+    elif mode == "write":
+        lower = text.lower()
+
+        if "email" in lower:
+            prompt = f"""
+Write a professional email based on this request.
+Keep it well-structured with subject, greeting, body, and closing.
+
+{text}
+"""
+        elif "report" in lower:
+            if retry:
+                prompt = f"Write a detailed, structured report (300-500 words):\n{text}"
+            else:
+                prompt = f"Write a concise but meaningful report (120-180 words):\n{text}"
+
+        elif "story" in lower:
+            if retry:
+                prompt = f"Write a detailed engaging story (300-500 words):\n{text}"
+            else:
+                prompt = f"Write a short but complete story (120-180 words):\n{text}"
+
+        else:
+            prompt = f"Write a clear and complete response:\n{text}"
+
+    # ===== GET RESPONSE =====
+    result = get_gemini_response(prompt)
+
+    # ===== FALLBACK IF FAILED =====
+    if not result:
+        result = fallback_response(text, mode, tone)
 
     return jsonify({"result": result})
 
 
+# ===== RUN =====
 if __name__ == "__main__":
     app.run(debug=True)
